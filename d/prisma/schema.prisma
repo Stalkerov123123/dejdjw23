@@ -1,0 +1,98 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Факультет
+model Faculty {
+  id        String   @id @default(cuid())
+  name      String   @unique // Название факультета
+  code      String?  // Код факультета для парсинга
+  groups    Group[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Группа
+model Group {
+  id         String   @id @default(cuid())
+  name       String   @unique // Название группы
+  code       String?  // Код группы для парсинга
+  facultyId  String
+  faculty    Faculty  @relation(fields: [facultyId], references: [id], onDelete: Cascade)
+  veds       Ved[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+// Ведомость
+model Ved {
+  id           String        @id @default(cuid())
+  faculty      String        // Факультет
+  groupName    String        // Название группы
+  course       Int           // Курс (1-6)
+  year         String        // Учебный год (например, "2023-2024")
+  semester     Int           // Семестр (1 или 2)
+  subject      String        // Название предмета
+  vedType      String        // Тип ведомости (экзамен, зачёт, КП и т.д.)
+  isClosed     Boolean       @default(false) // Закрыта ли ведомость
+  groupId      String?       // Связь с группой (опционально)
+  group        Group?        @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  studentRecords StudentRecord[]
+  updatedAt    DateTime      @updatedAt
+  createdAt    DateTime      @default(now())
+
+  @@index([faculty])
+  @@index([groupName])
+  @@index([year])
+  @@index([semester])
+  @@index([subject])
+}
+
+// Запись студента в ведомости
+model StudentRecord {
+  id           String   @id @default(cuid())
+  vedId        String
+  ved          Ved      @relation(fields: [vedId], references: [id], onDelete: Cascade)
+  gradebook    String   // Номер зачётной книжки (единственный идентификатор!)
+  points1      Int?     // Балл КТ1
+  points2      Int?     // Балл КТ2
+  points3      Int?     // Балл КТ3
+  points4      Int?     // Дополнительные баллы
+  totalPoints  Int?     // Итоговые баллы
+  grade        String?  // Оценка (5, 4, 3, 2, зачёт, незачёт)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([gradebook])
+  @@index([vedId])
+}
+
+// Лог парсинга
+model ParseLog {
+  id          String   @id @default(cuid())
+  status      String   // success, error, in_progress
+  message     String?  // Сообщение об ошибке или успехе
+  vedsParsed  Int      @default(0) // Количество обработанных ведомостей
+  recordsParsed Int    @default(0) // Количество записей студентов
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  error       String?  // Текст ошибки
+  createdAt   DateTime @default(now())
+}
+
+// Метаданные для кэширования
+model CacheMetadata {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+}

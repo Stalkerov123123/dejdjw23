@@ -1,0 +1,14 @@
+FROM oven/bun:1-slim
+
+WORKDIR /app
+
+# Copy scheduler service
+COPY mini-services/scheduler ./scheduler
+
+WORKDIR /app/scheduler
+
+# Install dependencies
+RUN bun install
+
+# Run scheduler
+CMD ["bun", "run", "index.ts"]
