@@ -1,192 +1,201 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { fullParse, generateDemoData, checkSiteAvailability, getAcademicYears } from '@/lib/parser';
+import { checkSiteAvailability, generateDemoData, getAcademicYears, simpleParse } from '@/lib/parser';
 
 // POST /api/parse - Запуск парсинга
 export async function POST(request: NextRequest) {
+  console.log('[API] POST /api/parse - запуск');
+  
   try {
     const body = await request.json().catch(() => ({}));
     const useDemo = body.demo === true;
 
-    // Создаём запись лога
+    console.log(`[API] Режим: ${useDemo ? 'демо' : 'реальный парсинг'}`);
+
+    // Создаём лог
     const parseLog = await db.parseLog.create({
       data: {
         status: 'in_progress',
-        message: useDemo 
-          ? 'Генерация демо-данных...' 
-          : 'Проверка подключения к сайту rating.vsuet.ru...',
+        message: useDemo ? 'Генерация демо-данных...' : 'Проверка сайта...',
+        vedsParsed: 0,
+        recordsParsed: 0,
       },
     });
 
-    // Запускаем парсинг асинхронно
-    (async () => {
-      try {
-        let veds;
-        let errors: string[] = [];
+    console.log(`[API] Создан лог: ${parseLog.id}`);
 
-        if (useDemo) {
-          // Демо-данные
-          veds = generateDemoData();
-        } else {
-          // Проверяем доступность сайта
-          const availability = await checkSiteAvailability();
-          
-          if (!availability.available) {
-            await db.parseLog.update({
-              where: { id: parseLog.id },
-              data: {
-                status: 'error',
-                message: `Сайт rating.vsuet.ru недоступен: ${availability.message}. Используйте демо-данные.`,
-                finishedAt: new Date(),
-              },
-            });
-            return;
-          }
-
-          // Запускаем парсинг
-          const result = await fullParse((message, current, total) => {
-            // Можно добавить WebSocket для实时 обновления
-            console.log(`[${current}/${total}] ${message}`);
-          });
-          
-          veds = result.veds;
-          errors = result.errors;
-        }
-
-        // Если данных нет
-        if (!veds || veds.length === 0) {
-          await db.parseLog.update({
-            where: { id: parseLog.id },
-            data: {
-              status: 'error',
-              message: errors.length > 0 
-                ? errors[0] 
-                : 'Не удалось получить данные с сайта. Попробуйте демо-режим.',
-              finishedAt: new Date(),
-            },
-          });
-          return;
-        }
-
-        let vedsCount = 0;
-        let recordsCount = 0;
-
-        // Очищаем старые данные (опционально)
-        // await db.studentRecord.deleteMany({});
-        // await db.ved.deleteMany({});
-
-        // Сохраняем данные в БД
-        for (const ved of veds) {
-          try {
-            // Ищем существующую ведомость
-            const existingVed = await db.ved.findFirst({
-              where: {
-                faculty: ved.faculty,
-                groupName: ved.groupName,
-                subject: ved.subject,
-                year: ved.year,
-                semester: ved.semester,
-                vedType: ved.vedType,
-              },
-            });
-
-            let vedRecord;
-            if (existingVed) {
-              // Удаляем старые записи
-              await db.studentRecord.deleteMany({
-                where: { vedId: existingVed.id },
-              });
-
-              // Обновляем
-              vedRecord = await db.ved.update({
-                where: { id: existingVed.id },
-                data: {
-                  course: ved.course,
-                  isClosed: ved.isClosed,
-                  updatedAt: new Date(),
-                },
-              });
-            } else {
-              // Создаём новую
-              vedRecord = await db.ved.create({
-                data: {
-                  faculty: ved.faculty,
-                  groupName: ved.groupName,
-                  course: ved.course,
-                  year: ved.year,
-                  semester: ved.semester,
-                  subject: ved.subject,
-                  vedType: ved.vedType,
-                  isClosed: ved.isClosed,
-                },
-              });
-            }
-
-            vedsCount++;
-
-            // Создаём записи студентов батчами
-            const batchSize = 100;
-            for (let i = 0; i < ved.students.length; i += batchSize) {
-              const batch = ved.students.slice(i, i + batchSize);
-              await db.studentRecord.createMany({
-                data: batch.map(student => ({
-                  vedId: vedRecord.id,
-                  gradebook: student.gradebook,
-                  points1: student.points1,
-                  points2: student.points2,
-                  points3: student.points3,
-                  points4: student.points4,
-                  totalPoints: student.totalPoints,
-                  grade: student.grade,
-                })),
-              });
-            }
-            recordsCount += ved.students.length;
-
-          } catch (error) {
-            console.error(`Error saving ved ${ved.subject}:`, error);
-          }
-        }
-
-        // Обновляем лог
-        await db.parseLog.update({
-          where: { id: parseLog.id },
-          data: {
-            status: errors.length > 0 ? 'error' : 'success',
-            message: errors.length > 0 
-              ? `Завершено с ошибками: ${errors.slice(0, 3).join('; ')}` 
-              : `Успешно загружено ${vedsCount} ведомостей за ${getAcademicYears().join(', ')} учебные годы`,
-            vedsParsed: vedsCount,
-            recordsParsed: recordsCount,
-            finishedAt: new Date(),
-          },
-        });
-
-      } catch (error) {
-        console.error('Parse error:', error);
-        await db.parseLog.update({
-          where: { id: parseLog.id },
-          data: {
-            status: 'error',
-            message: `Ошибка: ${error}`,
-            finishedAt: new Date(),
-          },
-        });
-      }
-    })();
+    // Запускаем асинхронно
+    parseAsync(parseLog.id, useDemo);
 
     return NextResponse.json({
       success: true,
       message: useDemo ? 'Генерация демо-данных запущена' : 'Парсинг запущен',
       logId: parseLog.id,
-      years: getAcademicYears(),
     });
   } catch (error) {
-    console.error('API error:', error);
+    console.error('[API] Ошибка:', error);
     return NextResponse.json(
-      { success: false, error: 'Ошибка запуска парсинга' },
+      { success: false, error: String(error) },
       { status: 500 }
     );
+  }
+}
+
+// Асинхронная обработка
+async function parseAsync(logId: string, useDemo: boolean) {
+  console.log(`[ParseAsync] Начало, logId=${logId}, demo=${useDemo}`);
+  
+  try {
+    let veds;
+    let errors: string[] = [];
+
+    if (useDemo) {
+      // Демо-данные
+      console.log('[ParseAsync] Генерация демо-данных...');
+      veds = generateDemoData();
+      console.log(`[ParseAsync] Сгенерировано ${veds.length} ведомостей`);
+    } else {
+      // Проверяем сайт
+      console.log('[ParseAsync] Проверка доступности сайта...');
+      const availability = await checkSiteAvailability();
+      console.log(`[ParseAsync] Сайт: ${availability.available ? 'доступен' : 'недоступен'} - ${availability.message}`);
+
+      if (!availability.available) {
+        await updateLog(logId, 'error', `Сайт недоступен: ${availability.message}`);
+        return;
+      }
+
+      // Пробуем распарсить
+      console.log('[ParseAsync] Попытка парсинга...');
+      const result = await simpleParse();
+      veds = result.veds;
+      errors = result.errors;
+      
+      console.log(`[ParseAsync] Результат: ${veds.length} ведомостей, ${errors.length} ошибок`);
+    }
+
+    // Проверяем что есть данные
+    if (!veds || veds.length === 0) {
+      const msg = errors.length > 0 ? errors[0] : 'Нет данных';
+      console.log(`[ParseAsync] Нет данных: ${msg}`);
+      await updateLog(logId, 'error', msg);
+      return;
+    }
+
+    // Сохраняем в БД
+    console.log('[ParseAsync] Сохранение в БД...');
+    
+    let vedsCount = 0;
+    let recordsCount = 0;
+
+    for (const ved of veds) {
+      try {
+        // Проверяем существующую ведомость
+        const existing = await db.ved.findFirst({
+          where: {
+            faculty: ved.faculty,
+            groupName: ved.groupName,
+            subject: ved.subject,
+            year: ved.year,
+            semester: ved.semester,
+            vedType: ved.vedType,
+          },
+        });
+
+        let vedRecord;
+        if (existing) {
+          // Удаляем старые записи
+          await db.studentRecord.deleteMany({
+            where: { vedId: existing.id },
+          });
+
+          vedRecord = await db.ved.update({
+            where: { id: existing.id },
+            data: {
+              course: ved.course,
+              isClosed: ved.isClosed,
+              updatedAt: new Date(),
+            },
+          });
+        } else {
+          vedRecord = await db.ved.create({
+            data: {
+              faculty: ved.faculty,
+              groupName: ved.groupName,
+              course: ved.course,
+              year: ved.year,
+              semester: ved.semester,
+              subject: ved.subject,
+              vedType: ved.vedType,
+              isClosed: ved.isClosed,
+            },
+          });
+        }
+
+        vedsCount++;
+
+        // Сохраняем студентов
+        if (ved.students.length > 0) {
+          await db.studentRecord.createMany({
+            data: ved.students.map(s => ({
+              vedId: vedRecord.id,
+              gradebook: s.gradebook,
+              points1: s.points1,
+              points2: s.points2,
+              points3: s.points3,
+              points4: s.points4,
+              totalPoints: s.totalPoints,
+              grade: s.grade,
+            })),
+          });
+          recordsCount += ved.students.length;
+        }
+
+        // Логируем каждые 100 ведомостей
+        if (vedsCount % 100 === 0) {
+          console.log(`[ParseAsync] Сохранено ${vedsCount}/${veds.length} ведомостей...`);
+        }
+      } catch (e) {
+        console.error(`[ParseAsync] Ошибка сохранения ведомости:`, e);
+      }
+    }
+
+    console.log(`[ParseAsync] Итого: ${vedsCount} ведомостей, ${recordsCount} записей`);
+
+    // Обновляем лог
+    await updateLog(logId, 'success', 
+      `Успешно: ${vedsCount} ведомостей, ${recordsCount} записей`,
+      vedsCount, recordsCount
+    );
+
+    console.log('[ParseAsync] Завершено успешно');
+  } catch (error) {
+    console.error('[ParseAsync] Критическая ошибка:', error);
+    await updateLog(logId, 'error', String(error));
+  }
+}
+
+// Обновление лога
+async function updateLog(
+  id: string, 
+  status: string, 
+  message: string,
+  vedsParsed?: number,
+  recordsParsed?: number
+) {
+  try {
+    await db.parseLog.update({
+      where: { id },
+      data: {
+        status,
+        message,
+        vedsParsed: vedsParsed ?? 0,
+        recordsParsed: recordsParsed ?? 0,
+        finishedAt: new Date(),
+      },
+    });
+  } catch (e) {
+    console.error('[API] Ошибка обновления лога:', e);
   }
 }
 
@@ -198,9 +207,8 @@ export async function GET() {
     });
 
     const availability = await checkSiteAvailability();
-    const years = getAcademicYears();
 
-    // Статистика
+    // Считаем статистику
     const totalVeds = await db.ved.count();
     const totalRecords = await db.studentRecord.count();
     const faculties = await db.ved.groupBy({
@@ -213,7 +221,7 @@ export async function GET() {
       log: lastLog,
       siteAvailable: availability.available,
       siteMessage: availability.message,
-      years,
+      years: getAcademicYears(),
       stats: {
         totalVeds,
         totalRecords,
@@ -221,10 +229,14 @@ export async function GET() {
       },
     });
   } catch (error) {
-    console.error('API error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Ошибка получения статуса' },
-      { status: 500 }
-    );
+    console.error('[API] GET error:', error);
+    return NextResponse.json({
+      success: true,
+      log: null,
+      siteAvailable: false,
+      siteMessage: 'Ошибка проверки',
+      years: getAcademicYears(),
+      stats: { totalVeds: 0, totalRecords: 0, facultiesCount: 0 },
+    });
   }
 }
